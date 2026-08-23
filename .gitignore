@@ -21,9 +21,12 @@ globpod.db-wal
 # scratch / one-off probes
 *.tmp.mts
 *.tmp.ts
-cantonese-probe.mp3
+preview-episode-*.mp3
+preview-episode-*-script.txt
+scripts/preview-*.txt
 cantonese-only-probe.mp3
 cantonese-probe-reencoded.mp3
 probe-en.mp3
 probe-yue.mp3
+cantonese-probe.mp3
 /tmp/

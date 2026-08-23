@@ -14,6 +14,9 @@ import type { Article, GroupedArticles } from "./fetchArticles.js";
 import { withRetry } from "../util/retry.js";
 import type { AudioSegment } from "./generateAudio.js";
 import { inferSegmentsFromScript } from "./generateAudio.js";
+import { containsSpeechArtifacts, sanitizeForSpeech } from "./sanitizeSpeech.js";
+
+type Region = Article["region"];
 
 const MODEL = "claude-sonnet-5";
 
@@ -80,7 +83,7 @@ Follow-ups need backstory. If today's item only makes sense if you already know 
 
 SCRIPT FORMAT
 
-The podcast script itself must be spoken prose only. No markdown, no headers, no bullet points, no section labels, no stage directions, no speaker names. Never write words like "Intro", "Outro", or "Hong Kong section" — nothing that is not meant to be said out loud. Paragraph breaks are the only structure you have.
+The podcast script itself must be spoken prose only. No markdown, no headers, no bullet points, no section labels, no stage directions, no speaker names. Never write words like "Intro", "Outro", or "Hong Kong section" — nothing that is not meant to be said out loud. Never include URLs, web addresses, story_id codes (hk-1, uk-2), or the word "http" anywhere in segments — those exist only in used_ids. Paragraph breaks are the only structure you have.
 
 RESPONSE FORMAT
 
@@ -98,7 +101,7 @@ Respond with a single JSON object only — no markdown fences, no commentary bef
 }
 
 segments is required for text-to-speech: lang must be "en" or "yue" (Cantonese). One segment per major block above — do not mix languages inside a segment.
-used_ids must be copied exactly from the candidate id= values you actually covered. Do not invent ids.
+used_ids must list story_id codes only (e.g. hk-1, uk-2, nl-3) for every story you covered — copied exactly from the candidate list. Never put URLs in used_ids or segments.
 summary must be plain English (even when the HK section is Cantonese), suitable as an episode description in Overcast/Apple Podcasts — no spoilers beyond the headlines, no markdown.`;
 
 /**
@@ -121,11 +124,25 @@ export function allCandidates(articles: GroupedArticles): Article[] {
 }
 
 /**
+ * Map short story_id codes (hk-1) to full dedup keys for SQLite.
+ */
+export function buildStoryIdMap(articles: GroupedArticles): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const region of ["hk", "uk", "nl"] as Region[]) {
+    candidatesForRegion(articles[region]).forEach((a, i) => {
+      map.set(`${region}-${i + 1}`, a.id);
+    });
+  }
+  return map;
+}
+
+/**
  * Format a region's candidate articles as a readable block for the prompt.
  */
 function formatArticles(
   articles: Article[],
-  regionLabel: string
+  regionLabel: string,
+  regionCode: Region
 ): string {
   const candidates = candidatesForRegion(articles);
   if (candidates.length === 0) {
@@ -135,7 +152,7 @@ function formatArticles(
   const items = candidates
     .map(
       (a, i) =>
-        `${i + 1}. id=${a.id}\n   **${a.title}** (${a.feedName})\n   ${a.summary.slice(0, SUMMARY_CHARS)}`
+        `${i + 1}. story_id=${regionCode}-${i + 1}\n   ${a.title} (${a.feedName})\n   ${a.summary.slice(0, SUMMARY_CHARS)}`
     )
     .join("\n\n");
 
@@ -150,9 +167,16 @@ function buildPrompt(articles: GroupedArticles): string {
     day: "numeric",
   });
 
-  const hkBlock = formatArticles(articles.hk, "Hong Kong");
-  const ukBlock = formatArticles(articles.uk, "United Kingdom");
-  const nlBlock = formatArticles(articles.nl, "Netherlands");
+  const hkBlock = formatArticles(articles.hk, "Hong Kong", "hk");
+  const ukBlock = formatArticles(articles.uk, "United Kingdom", "uk");
+  const nlBlock = formatArticles(articles.nl, "Netherlands", "nl");
+
+  const hkMustCoverAll =
+    articles.hk.length > 0 && articles.hk.length <= STORIES_PER_REGION;
+  const ukMustCoverAll =
+    articles.uk.length > 0 && articles.uk.length <= STORIES_PER_REGION;
+  const nlMustCoverAll =
+    articles.nl.length > 0 && articles.nl.length <= STORIES_PER_REGION;
 
   return `Write today's episode. Today is ${today}.
 
@@ -177,6 +201,9 @@ STRUCTURE
 HOW TO HANDLE EACH STORY
 
 - Pick the ${STORIES_PER_REGION} most significant stories per region from the candidates below. Prefer stories that matter to someone who lives in or comes from that place over international stories that merely happened to appear in that region's feed. Related international news for a region is fine when it clearly connects to that place; pure wire filler is not.
+${hkMustCoverAll ? `- Hong Kong lists exactly ${articles.hk.length} candidate(s) — cover every one.` : ""}
+${ukMustCoverAll ? `- United Kingdom lists exactly ${articles.uk.length} candidate(s) — cover every one.` : ""}
+${nlMustCoverAll ? `- Netherlands lists exactly ${articles.nl.length} candidate(s) — cover every one.` : ""}
 - Give every story its OWN paragraph. Never chain two stories into one paragraph.
 - Each story gets at least three or four sentences — at the length target above, that usually means six to ten. Say what happened, then who it affects and why it matters, then whatever context makes it land.
 - If the day's news is a follow-up to an ongoing story — a deadline, a response, an update, a "no delay", a next hearing, a second vote — open with one plain sentence of backstory before the update. Assume she may have missed earlier chapters. Example shape: what the original event/scheme was, then today's development. Keep that backstory to one sentence, not a full history lesson.
@@ -192,9 +219,36 @@ ${ukBlock}
 ${nlBlock}
 
 Return ONLY the JSON object described in your instructions: {"used_ids":[...],"summary":"...","segments":[...]}.
-used_ids must list every candidate id= value you covered, copied exactly.
+used_ids must list story_id codes only (hk-1, uk-2, nl-3, etc.) for every story covered.
 summary must be 2–3 English sentences describing today's episode for podcast apps.
-segments must follow the greeting → HK (yue) → UK (en) → NL (en) → sign-off (en) structure.`;
+segments must follow the greeting → HK (yue) → UK (en) → NL (en) → sign-off (en) structure. The greeting segment is mandatory — open in English before any Hong Kong news.`;
+}
+
+function cleanSegmentText(text: string): string {
+  return sanitizeForSpeech(text);
+}
+
+function normalizeSegments(segments: AudioSegment[]): AudioSegment[] {
+  return segments
+    .map((s) => ({ ...s, text: cleanSegmentText(s.text) }))
+    .filter((s) => s.text.length > 0);
+}
+
+function validateSegments(segments: AudioSegment[]): void {
+  if (segments.length < 3) {
+    throw new Error(`expected at least 3 speech segments, got ${segments.length}`);
+  }
+  if (segments[0].lang !== "en") {
+    throw new Error("first segment must be an English greeting");
+  }
+  if (segments[0].text.length < 30) {
+    throw new Error("English greeting segment is too short");
+  }
+  for (const seg of segments) {
+    if (containsSpeechArtifacts(seg.text)) {
+      throw new Error(`segment contains URL or metadata: ${seg.text.slice(0, 80)}…`);
+    }
+  }
 }
 
 function parseSegments(raw: unknown, script: string): AudioSegment[] {
@@ -207,7 +261,7 @@ function parseSegments(raw: unknown, script: string): AudioSegment[] {
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
     const row = item as Record<string, unknown>;
-    const text = typeof row.text === "string" ? row.text.trim() : "";
+    const text = typeof row.text === "string" ? cleanSegmentText(row.text.trim()) : "";
     if (!text) continue;
     const langRaw = row.lang;
     const lang: AudioSegment["lang"] =
@@ -237,9 +291,19 @@ function joinSegments(segments: AudioSegment[]): string {
 // Response parsing (with fallback)
 // ---------------------------------------------------------------------------
 
-interface ParsedPayload {
-  script: string;
-  usedIds: string[];
+function resolveUsedIds(
+  rawIds: string[],
+  storyIdMap: Map<string, string>,
+  candidateById: Map<string, Article>
+): string[] {
+  const resolved: string[] = [];
+  for (const raw of rawIds) {
+    if (typeof raw !== "string") continue;
+    const key = raw.trim();
+    const id = storyIdMap.get(key) ?? (candidateById.has(key) ? key : null);
+    if (id) resolved.push(id);
+  }
+  return [...new Set(resolved)];
 }
 
 /**
@@ -287,7 +351,8 @@ function extractJsonObject(raw: string): unknown | null {
  */
 function parseScriptResponse(
   raw: string,
-  candidates: Article[]
+  candidates: Article[],
+  storyIdMap: Map<string, string>
 ): ScriptResult {
   const candidateById = new Map(candidates.map((a) => [a.id, a]));
   const fallbackIds = candidates.map((a) => a.id);
@@ -295,18 +360,23 @@ function parseScriptResponse(
 
   const fallbackSummary = "";
 
-  // No JSON at all — if the raw text looks like a script, use it with fallback ids
   if (!parsed || typeof parsed !== "object") {
-    const maybeScript = raw.trim();
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("{") || trimmed.includes('"used_ids"')) {
+      throw new Error("Claude response was JSON but could not be parsed");
+    }
+    const maybeScript = cleanSegmentText(trimmed);
     if (maybeScript.length < 200) {
       throw new Error("Claude response was not valid JSON and too short to treat as a script");
     }
     console.warn(
       "[script] WARN: could not parse JSON — blacklisting all candidates shown to Claude as fallback"
     );
+    const segments = normalizeSegments(inferSegmentsFromScript(maybeScript));
+    validateSegments(segments);
     return {
       script: maybeScript,
-      segments: inferSegmentsFromScript(maybeScript),
+      segments,
       usedArticleIds: fallbackIds,
       usedFallback: true,
       summary: fallbackSummary,
@@ -328,12 +398,14 @@ function parseScriptResponse(
     typeof obj.text === "string" ? obj.text.trim() :
     "";
 
-  const segments = parseSegments(obj.segments, scriptFromJson);
+  const segments = normalizeSegments(parseSegments(obj.segments, scriptFromJson));
   const script = scriptFromJson || joinSegments(segments);
 
   if (script.length < 200) {
     throw new Error("Claude JSON response missing a usable script (too short)");
   }
+
+  validateSegments(segments);
 
   const rawIds = Array.isArray(obj.used_ids)
     ? obj.used_ids
@@ -342,16 +414,9 @@ function parseScriptResponse(
       : null;
 
   const validIds =
-    rawIds === null
-      ? []
-      : rawIds.filter(
-          (id): id is string => typeof id === "string" && candidateById.has(id)
-        );
+    rawIds === null ? [] : resolveUsedIds(rawIds, storyIdMap, candidateById);
 
-  // Deduplicate while preserving order
-  const uniqueValid = [...new Set(validIds)];
-
-  if (uniqueValid.length === 0) {
+  if (validIds.length === 0) {
     console.warn(
       "[script] WARN: used_ids missing or invalid — blacklisting all candidates shown to Claude as fallback"
     );
@@ -364,13 +429,13 @@ function parseScriptResponse(
     };
   }
 
-  if (rawIds && uniqueValid.length < rawIds.length) {
+  if (rawIds && validIds.length < rawIds.length) {
     console.warn(
-      `[script] WARN: dropped ${rawIds.length - uniqueValid.length} used_id(s) not in candidate set`
+      `[script] WARN: dropped ${rawIds.length - validIds.length} used_id(s) not in candidate set`
     );
   }
 
-  return { script, segments, usedArticleIds: uniqueValid, usedFallback: false, summary };
+  return { script, segments, usedArticleIds: validIds, usedFallback: false, summary };
 }
 
 // ---------------------------------------------------------------------------
@@ -389,37 +454,45 @@ export async function generateScript(
   });
 
   const candidates = allCandidates(articles);
+  const storyIdMap = buildStoryIdMap(articles);
   const prompt = buildPrompt(articles);
 
   console.log("[script] Generating podcast script via Claude...");
 
-  const response = await withRetry(
-    () =>
-      client.messages.create({
+  const result = await withRetry(
+    async () => {
+      const response = await client.messages.create({
         model: MODEL,
         max_tokens: MAX_TOKENS,
         system: SYSTEM_PROMPT,
         messages: [{ role: "user", content: prompt }],
-      }),
+      });
+
+      const textBlock = response.content.find((b) => b.type === "text");
+      if (!textBlock || textBlock.type !== "text") {
+        const kinds = response.content.map((b) => b.type).join(", ") || "none";
+        throw new Error(
+          `No text block in Claude response (stop_reason=${String(response.stop_reason)}, blocks=[${kinds}])`
+        );
+      }
+
+      return parseScriptResponse(textBlock.text, candidates, storyIdMap);
+    },
     { label: "generateScript/claude", attempts: 3, baseDelayMs: 2000 }
   );
 
-  // Find the text block. Don't assume content[0] — Sonnet 5 has adaptive
-  // thinking on by default, so thinking blocks can precede the text.
-  const textBlock = response.content.find((b) => b.type === "text");
-  if (!textBlock || textBlock.type !== "text") {
-    const kinds = response.content.map((b) => b.type).join(", ") || "none";
-    throw new Error(
-      `No text block in Claude response (stop_reason=${String(response.stop_reason)}, blocks=[${kinds}])`
-    );
-  }
-
-  const result = parseScriptResponse(textBlock.text, candidates);
-
   if (result.segments.filter((s) => s.lang === "yue").length === 0) {
     console.warn("[script] WARN: no Cantonese segments — inferring from script line breaks");
-    result.segments = inferSegmentsFromScript(result.script);
+    result.segments = normalizeSegments(inferSegmentsFromScript(result.script));
+    validateSegments(result.segments);
   }
+
+  console.log(
+    `[script] Segments: ${result.segments.length} ` +
+      `(${result.segments.filter((s) => s.lang === "en").length} en, ` +
+      `${result.segments.filter((s) => s.lang === "yue").length} yue); ` +
+      `greeting: "${result.segments[0]?.text.slice(0, 72)}…"`
+  );
 
   // The script is mixed-language, so whitespace word counts undercount the
   // Cantonese section badly — CJK isn't space-delimited. Report both.

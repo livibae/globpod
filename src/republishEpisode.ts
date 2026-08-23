@@ -6,9 +6,11 @@
  * Does NOT blacklist articles again.
  *
  * Usage: npx tsx src/republishEpisode.ts 2026-08-23
+ *        npx tsx src/republishEpisode.ts 2026-08-23 --use-preview
  */
 
 import "dotenv/config";
+import { readFile } from "fs/promises";
 import { XMLParser } from "fast-xml-parser";
 import { getUsedArticlesForDate } from "./db/sqlite.js";
 import type { Article, GroupedArticles } from "./pipeline/fetchArticles.js";
@@ -43,6 +45,11 @@ function extractEpisodeSummary(feedXml: string, date: string): string | undefine
   return undefined;
 }
 
+function extractSummaryFromPreviewScript(text: string): string | undefined {
+  const m = text.match(/=== SUMMARY ===\n([\s\S]*?)\n\n=== SEGMENTS/);
+  return m?.[1]?.trim() || undefined;
+}
+
 function filterToUsedIds(
   grouped: GroupedArticles,
   usedIds: Set<string>
@@ -74,9 +81,33 @@ function articleFromRecord(row: {
 }
 
 async function main(): Promise<void> {
-  const date = process.argv[2] ?? new Date().toISOString().slice(0, 10);
-  console.log(`\n====== Republishing GlobPod episode ${date} ======`);
+  const args = process.argv.slice(2);
+  const usePreview = args.includes("--use-preview");
+  const date = args.find((a) => /^\d{4}-\d{2}-\d{2}$/.test(a)) ??
+    new Date().toISOString().slice(0, 10);
 
+  console.log(`\n====== Republishing GlobPod episode ${date} ======`);
+  if (usePreview) {
+    console.log("[republish] Using local preview MP3 (no script/TTS regen)");
+  }
+
+  const existingFeed = await fetchExistingFeed();
+
+  let audioBuffer: Buffer;
+  let summary: string | undefined;
+
+  if (usePreview) {
+    const mp3Path = `preview-episode-${date}.mp3`;
+    const scriptPath = `preview-episode-${date}-script.txt`;
+    audioBuffer = await readFile(mp3Path);
+    try {
+      const scriptText = await readFile(scriptPath, "utf-8");
+      summary = extractSummaryFromPreviewScript(scriptText);
+    } catch {
+      console.warn("[republish] WARN: no preview script file — keeping feed blurb");
+    }
+    console.log(`[republish] Loaded ${mp3Path} (${Math.round(audioBuffer.length / 1024)} KB)`);
+  } else {
   const usedRows = getUsedArticlesForDate(date);
   if (usedRows.length === 0) {
     throw new Error(`No used articles in SQLite for ${date} — cannot republish`);
@@ -111,16 +142,15 @@ async function main(): Promise<void> {
     );
   }
 
-  const existingFeed = await fetchExistingFeed();
   const preservedSummary = existingFeed
     ? extractEpisodeSummary(existingFeed, date)
     : undefined;
-  if (preservedSummary) {
+  if (preservedSummary && !usePreview) {
     console.log("[republish] Preserving existing episode blurb from feed");
   }
 
   console.log("\n→ [generateScript]");
-  let { script, segments, summary } = await generateScript(articles);
+  let { script, segments, summary: generatedSummary } = await generateScript(articles);
   const yueSegments = segments.filter((s) => s.lang === "yue").length;
   if (yueSegments === 0) {
     console.warn(
@@ -133,8 +163,14 @@ async function main(): Promise<void> {
   );
 
   console.log("\n→ [generateAudio]");
-  const audioBuffer = await generateAudio(segments);
+  audioBuffer = await generateAudio(segments);
+  summary = preservedSummary ?? generatedSummary;
   console.log("✓ [generateAudio] done");
+  }
+
+  if (!summary && existingFeed) {
+    summary = extractEpisodeSummary(existingFeed, date);
+  }
 
   console.log("\n→ [uploadMp3]");
   const audioUrl = await uploadMp3(audioBuffer, date, {
@@ -148,7 +184,7 @@ async function main(): Promise<void> {
     audioUrl,
     audioBuffer,
     audioSize: audioBuffer.length,
-    summary: preservedSummary ?? summary,
+    summary: summary,
   });
   console.log("✓ [buildUpdatedFeed] done");
 

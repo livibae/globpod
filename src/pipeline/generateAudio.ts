@@ -9,6 +9,7 @@
  */
 
 import { withRetry } from "../util/retry.js";
+import { sanitizeForSpeech } from "./sanitizeSpeech.js";
 import { synthesizeCantonese } from "./synthesizeCantonese.js";
 import { stitchMp3Buffers } from "./stitchAudio.js";
 
@@ -215,9 +216,11 @@ export async function generateAudio(segments: AudioSegment[]): Promise<Buffer> {
   const parts: Buffer[] = [];
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
+    const speechText = sanitizeForSpeech(seg.text);
+    if (!speechText) continue;
     const chars = seg.lang === "yue"
-      ? (seg.text.match(/[\u4e00-\u9fff]/g) ?? []).length
-      : seg.text.length;
+      ? (speechText.match(/[\u4e00-\u9fff]/g) ?? []).length
+      : speechText.length;
     const provider =
       seg.lang === "yue"
         ? `Edge ${process.env.CANTONESE_TTS_VOICE ?? "zh-HK-HiuMaanNeural"}`
@@ -225,7 +228,12 @@ export async function generateAudio(segments: AudioSegment[]): Promise<Buffer> {
     console.log(
       `[audio] Segment ${i + 1}/${segments.length} (${seg.lang}, ~${chars} chars, ${provider})`
     );
-    const part = await synthesizeSegment(apiKey, voiceId, seg, `seg${i + 1}-${seg.lang}`);
+    const part = await synthesizeSegment(
+      apiKey,
+      voiceId,
+      { lang: seg.lang, text: speechText },
+      `seg${i + 1}-${seg.lang}`
+    );
     parts.push(part);
   }
 
