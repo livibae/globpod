@@ -86,14 +86,46 @@ const DEFAULT_VOICE_SETTINGS = {
 
 /**
  * Infer language segments from a flat script (fallback when JSON has no segments).
- * Each paragraph becomes one segment; CJK-heavy paragraphs → Cantonese.
+ * Splits on paragraph breaks, then merges lines by language when needed.
  */
 export function inferSegmentsFromScript(script: string): AudioSegment[] {
-  const paragraphs = script.split(/\n\n+/).map((p) => p.trim()).filter(Boolean);
-  return paragraphs.map((text) => ({
-    lang: isCantoneseParagraph(text) ? "yue" : "en",
-    text,
-  }));
+  const blocks = script.split(/\n\n+/).map((p) => p.trim()).filter(Boolean);
+  const segments: AudioSegment[] = [];
+
+  for (const block of blocks) {
+    segments.push(...inferSegmentsFromLines(block));
+  }
+
+  if (segments.length === 0 && script.trim()) {
+    return inferSegmentsFromLines(script.trim());
+  }
+
+  return segments;
+}
+
+/** Merge consecutive lines that share the same inferred language. */
+function inferSegmentsFromLines(text: string): AudioSegment[] {
+  const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return [];
+
+  const segments: AudioSegment[] = [];
+  let currentLang: SegmentLang = isCantoneseParagraph(lines[0]) ? "yue" : "en";
+  let currentLines: string[] = [lines[0]];
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    const lang: SegmentLang = isCantoneseParagraph(line) ? "yue" : "en";
+    if (lang === currentLang) {
+      currentLines.push(line);
+    } else {
+      segments.push({ lang: currentLang, text: currentLines.join("\n") });
+      currentLang = lang;
+      currentLines = [line];
+    }
+  }
+
+  segments.push({ lang: currentLang, text: currentLines.join("\n") });
+  return segments;
 }
 
 function isCantoneseParagraph(text: string): boolean {

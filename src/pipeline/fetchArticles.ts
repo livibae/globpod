@@ -58,9 +58,12 @@ export interface GroupedArticles {
   nl: Article[];
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
+export interface FetchArticlesOptions {
+  /** Include articles already used in a published episode (for republish). */
+  includeUsed?: boolean;
+  /** How far back to look for articles (default 24). */
+  maxAgeHours?: number;
+}
 
 const parser = new Parser({
   timeout: 10_000, // 10s per feed — fail fast rather than stall the pipeline
@@ -96,17 +99,20 @@ function parseFeedDate(raw: string): Date | null {
   return null;
 }
 
-/** Filter threshold: articles must be published within the last 24 hours. */
-function isRecent(pubDate: Date): boolean {
-  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  return pubDate > cutoff;
+/** Filter threshold: articles must be published within the lookback window. */
+function isRecent(pubDate: Date, maxAgeHours = 24): boolean {
+  const cutoff = Date.now() - maxAgeHours * 60 * 60 * 1000;
+  return pubDate.getTime() > cutoff;
 }
 
 /**
  * Fetch and parse a single RSS feed.
  * Returns an empty array on error so one bad feed doesn't kill the pipeline.
  */
-async function fetchFeed(source: FeedSource): Promise<Article[]> {
+async function fetchFeed(
+  source: FeedSource,
+  options?: FetchArticlesOptions
+): Promise<Article[]> {
   try {
     const feed = await parser.parseURL(source.url);
     const articles: Article[] = [];
@@ -135,14 +141,14 @@ async function fetchFeed(source: FeedSource): Promise<Article[]> {
         continue;
       }
 
-      // Only include articles from the last 24 hours
-      if (!isRecent(pubDate)) {
+      const maxAgeHours = options?.maxAgeHours ?? 24;
+      if (!isRecent(pubDate, maxAgeHours)) {
         skipped.old++;
         continue;
       }
 
       // Skip if already used in a published episode
-      if (hasArticle(id)) {
+      if (!options?.includeUsed && hasArticle(id)) {
         skipped.seen++;
         continue;
       }
@@ -187,9 +193,11 @@ async function fetchFeed(source: FeedSource): Promise<Article[]> {
  * Fetch all feeds, skip already-used articles, return grouped by region.
  * Read-only against SQLite — does not blacklist anything.
  */
-export async function fetchArticles(): Promise<GroupedArticles> {
+export async function fetchArticles(
+  options?: FetchArticlesOptions
+): Promise<GroupedArticles> {
   // Fetch all feeds concurrently
-  const results = await Promise.all(FEEDS.map(fetchFeed));
+  const results = await Promise.all(FEEDS.map((f) => fetchFeed(f, options)));
   const all = results.flat();
 
   // Group by region

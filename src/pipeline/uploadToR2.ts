@@ -69,12 +69,19 @@ function getFeedToken(): string {
 
 /**
  * Upload the daily MP3 episode to R2.
- * @param buffer - The MP3 audio Buffer from ElevenLabs
+ * @param buffer - The MP3 audio Buffer
  * @param date  - The episode date (YYYY-MM-DD), used as the filename
+ * @param options.cacheControl - Override Cache-Control (use for republish)
  * @returns The public HTTPS URL for the uploaded MP3
  */
-export async function uploadMp3(buffer: Buffer, date: string): Promise<string> {
+export async function uploadMp3(
+  buffer: Buffer,
+  date: string,
+  options?: { cacheControl?: string }
+): Promise<string> {
   const key = `episodes/${date}.mp3`;
+  const cacheControl =
+    options?.cacheControl ?? "public, max-age=31536000, immutable";
 
   console.log(`[r2] Uploading MP3 → ${key}`);
 
@@ -86,8 +93,7 @@ export async function uploadMp3(buffer: Buffer, date: string): Promise<string> {
           Key: key,
           Body: buffer,
           ContentType: "audio/mpeg",
-          // Cache for 1 year — episode audio never changes after upload
-          CacheControl: "public, max-age=31536000, immutable",
+          CacheControl: cacheControl,
         })
       ),
     { label: "uploadMp3/r2", attempts: 3, baseDelayMs: 1500 }

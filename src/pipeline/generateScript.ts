@@ -416,6 +416,11 @@ export async function generateScript(
 
   const result = parseScriptResponse(textBlock.text, candidates);
 
+  if (result.segments.filter((s) => s.lang === "yue").length === 0) {
+    console.warn("[script] WARN: no Cantonese segments — inferring from script line breaks");
+    result.segments = inferSegmentsFromScript(result.script);
+  }
+
   // The script is mixed-language, so whitespace word counts undercount the
   // Cantonese section badly — CJK isn't space-delimited. Report both.
   const cjkChars = (result.script.match(/[一-鿿]/g) ?? []).length;

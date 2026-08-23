@@ -8,6 +8,7 @@
     "build": "tsc",
     "start": "node --env-file=.env dist/scheduler.js",
     "run-once": "node --env-file=.env dist/index.js",
+    "republish": "tsx src/republishEpisode.ts",
     "dev": "tsx src/index.ts"
   },
   "dependencies": {

@@ -102,6 +102,20 @@ export function markArticlesUsed(articles: ArticleRecord[]): number {
 }
 
 /**
+ * Articles blacklisted for a published episode on the given calendar day (YYYY-MM-DD).
+ */
+export function getUsedArticlesForDate(datePrefix: string): ArticleRecord[] {
+  return initDb()
+    .prepare(
+      `SELECT id, title, feed_source, region, pub_date, used_at
+       FROM articles
+       WHERE used_at LIKE ?
+       ORDER BY region, id`
+    )
+    .all(`${datePrefix}%`) as ArticleRecord[];
+}
+
+/**
  * Remove articles older than RETENTION_DAYS.
  * Prefers used_at when present; falls back to fetched_at for legacy rows.
  * Called once per pipeline run to keep the DB lean.

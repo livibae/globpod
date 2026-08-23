@@ -19,7 +19,7 @@ import { fileURLToPath } from "url";
 import { purgeOldArticles, markArticlesUsed } from "./db/sqlite.js";
 import { fetchArticles } from "./pipeline/fetchArticles.js";
 import { generateScript, allCandidates } from "./pipeline/generateScript.js";
-import { generateAudio, fetchElevenLabsQuota, isQuotaWarning } from "./pipeline/generateAudio.js";
+import { generateAudio, fetchElevenLabsQuota, isQuotaWarning, inferSegmentsFromScript } from "./pipeline/generateAudio.js";
 import { uploadMp3, fetchExistingFeed, uploadFeed } from "./pipeline/uploadToR2.js";
 import { buildUpdatedFeed } from "./pipeline/updateFeed.js";
 import { sendErrorEmail, sendQuotaWarningEmail } from "./notify.js";
@@ -88,6 +88,12 @@ export async function runPipeline(): Promise<void> {
     () => generateScript(articles)
   );
 
+  let audioSegments = segments;
+  if (audioSegments.filter((s) => s.lang === "yue").length === 0) {
+    console.warn("[audio] WARN: no Cantonese segments — inferring from script line breaks");
+    audioSegments = inferSegmentsFromScript(script);
+  }
+
   // 3b. ElevenLabs quota check — warn early, never block the run
   try {
     const quota = await fetchElevenLabsQuota();
@@ -107,8 +113,8 @@ export async function runPipeline(): Promise<void> {
     );
   }
 
-  // 4. Generate MP3 audio via ElevenLabs
-  const audioBuffer = await step("generateAudio", () => generateAudio(segments));
+  // 4. Generate MP3 audio via ElevenLabs + Edge Cantonese
+  const audioBuffer = await step("generateAudio", () => generateAudio(audioSegments));
 
   // 5. Upload MP3 to R2
   const audioUrl = await step("uploadMp3", () => uploadMp3(audioBuffer, today));
