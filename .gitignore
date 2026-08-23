@@ -21,4 +21,5 @@ globpod.db-wal
 # scratch / one-off probes
 *.tmp.mts
 *.tmp.ts
+cantonese-probe.mp3
 /tmp/

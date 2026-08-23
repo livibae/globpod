@@ -1,6 +1,6 @@
 # GlobPod
 
-Personal AI-powered morning news podcast. Fetches RSS from Hong Kong, UK, and the Netherlands, writes a bilingual script with Claude, speaks it with ElevenLabs, and publishes a private podcast RSS feed on Cloudflare R2.
+Personal AI-powered morning news podcast. Fetches RSS from Hong Kong, UK, and the Netherlands, writes a bilingual script with Claude, speaks English with ElevenLabs and Hong Kong with Microsoft Edge Cantonese voices, and publishes a private podcast RSS feed on Cloudflare R2.
 
 ## Requirements
 
@@ -34,7 +34,7 @@ npm run build
 3. Skip the run if fewer than `MIN_ARTICLES_FOR_EPISODE` (default 5) new articles
 4. Claude writes a 10–15 min script (HK in Cantonese, UK/NL in English) + episode blurb + used article IDs
 5. Check ElevenLabs quota; email a warning at ≥80%
-6. ElevenLabs TTS → MP3
+6. TTS per segment → stitch MP3 (English: ElevenLabs; Cantonese HK: Edge `zh-HK-*`)
 7. Upload MP3 + updated RSS to R2
 8. Blacklist only the articles used in that published episode
 

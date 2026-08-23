@@ -1,20 +1,29 @@
 /**
- * Audio generation via ElevenLabs API.
+ * Audio generation for bilingual GlobPod episodes.
  *
- * Sends the podcast script to ElevenLabs (Multilingual v2 model)
- * and returns the resulting MP3 as a Node.js Buffer.
+ * English segments: ElevenLabs (custom voice).
+ * Cantonese segments: Microsoft Edge zh-HK neural voices (ElevenLabs has no yue).
+ * Parts are stitched into one MP3 with ffmpeg.
  *
- * Also checks subscription quota and can warn when usage is high (LIV-11).
+ * Also checks ElevenLabs subscription quota and can warn when usage is high (LIV-11).
  */
 
 import { withRetry } from "../util/retry.js";
+import { synthesizeCantonese } from "./synthesizeCantonese.js";
+import { stitchMp3Buffers } from "./stitchAudio.js";
 
 const ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1";
 
-// ElevenLabs Multilingual v2 — best quality for multi-language scripts
-const TTS_MODEL = "eleven_multilingual_v2";
+const TTS_MODEL_EN = process.env.ELEVENLABS_MODEL_EN ?? "eleven_multilingual_v2";
 
 const QUOTA_WARN_RATIO = Number(process.env.ELEVENLABS_QUOTA_WARN_RATIO ?? 0.8);
+
+export type SegmentLang = "en" | "yue";
+
+export interface AudioSegment {
+  lang: SegmentLang;
+  text: string;
+}
 
 export interface ElevenLabsQuota {
   characterCount: number;
@@ -68,22 +77,43 @@ export function isQuotaWarning(quota: ElevenLabsQuota): boolean {
   return quota.ratio >= QUOTA_WARN_RATIO;
 }
 
+const DEFAULT_VOICE_SETTINGS = {
+  stability: 0.5,
+  similarity_boost: 0.8,
+  style: 0.0,
+  use_speaker_boost: true,
+};
+
 /**
- * Convert a text script to MP3 audio using ElevenLabs TTS.
- * @param script - Plain-text podcast script (no markdown)
- * @returns MP3 audio as a Buffer
+ * Infer language segments from a flat script (fallback when JSON has no segments).
+ * Each paragraph becomes one segment; CJK-heavy paragraphs → Cantonese.
  */
-export async function generateAudio(script: string): Promise<Buffer> {
-  const apiKey = process.env.ELEVENLABS_API_KEY;
-  const voiceId = process.env.ELEVENLABS_VOICE_ID;
+export function inferSegmentsFromScript(script: string): AudioSegment[] {
+  const paragraphs = script.split(/\n\n+/).map((p) => p.trim()).filter(Boolean);
+  return paragraphs.map((text) => ({
+    lang: isCantoneseParagraph(text) ? "yue" : "en",
+    text,
+  }));
+}
 
-  if (!apiKey || !voiceId) {
-    throw new Error(
-      "Missing required env vars: ELEVENLABS_API_KEY and/or ELEVENLABS_VOICE_ID"
-    );
-  }
+function isCantoneseParagraph(text: string): boolean {
+  const cjkChars = (text.match(/[\u4e00-\u9fff]/g) ?? []).length;
+  if (cjkChars < 8) return false;
+  const latinWords = text.replace(/[\u4e00-\u9fff]/g, " ").split(/\s+/).filter(Boolean).length;
+  return cjkChars >= latinWords * 2;
+}
 
-  console.log("[audio] Sending script to ElevenLabs TTS...");
+async function synthesizeEnglish(
+  apiKey: string,
+  voiceId: string,
+  text: string,
+  label: string
+): Promise<Buffer> {
+  const body = {
+    text,
+    model_id: TTS_MODEL_EN,
+    voice_settings: DEFAULT_VOICE_SETTINGS,
+  };
 
   const response = await withRetry(
     async () => {
@@ -96,36 +126,80 @@ export async function generateAudio(script: string): Promise<Buffer> {
             "Content-Type": "application/json",
             Accept: "audio/mpeg",
           },
-          body: JSON.stringify({
-            text: script,
-            model_id: TTS_MODEL,
-            voice_settings: {
-              stability: 0.5, // balanced between consistent and expressive
-              similarity_boost: 0.8, // high fidelity to the selected voice
-              style: 0.0, // no extra style exaggeration
-              use_speaker_boost: true,
-            },
-          }),
+          body: JSON.stringify(body),
         }
       );
 
       if (!res.ok) {
         const errorText = await res.text().catch(() => "(no body)");
         throw new Error(
-          `ElevenLabs API error: ${res.status} ${res.statusText} — ${errorText}`
+          `ElevenLabs API error (${label}): ${res.status} ${res.statusText} — ${errorText}`
         );
       }
       return res;
     },
-    { label: "generateAudio/elevenlabs", attempts: 3, baseDelayMs: 2000 }
+    { label: `generateAudio/${label}`, attempts: 3, baseDelayMs: 2000 }
   );
 
-  // Stream the response body into a Buffer
   const arrayBuffer = await response.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
+  return Buffer.from(arrayBuffer);
+}
 
+async function synthesizeSegment(
+  apiKey: string,
+  voiceId: string,
+  segment: AudioSegment,
+  label: string
+): Promise<Buffer> {
+  if (segment.lang === "yue") {
+    return synthesizeCantonese(segment.text);
+  }
+  return synthesizeEnglish(apiKey, voiceId, segment.text, label);
+}
+
+/**
+ * Convert labeled script segments to one MP3.
+ */
+export async function generateAudio(segments: AudioSegment[]): Promise<Buffer> {
+  const apiKey = process.env.ELEVENLABS_API_KEY;
+  const voiceId = process.env.ELEVENLABS_VOICE_ID;
+
+  if (!apiKey || !voiceId) {
+    throw new Error(
+      "Missing required env vars: ELEVENLABS_API_KEY and/or ELEVENLABS_VOICE_ID"
+    );
+  }
+
+  if (segments.length === 0) {
+    throw new Error("generateAudio: no segments to synthesize");
+  }
+
+  const yueCount = segments.filter((s) => s.lang === "yue").length;
+  const enCount = segments.filter((s) => s.lang === "en").length;
+  console.log(
+    `[audio] Synthesizing ${segments.length} segment(s): ${enCount} English (ElevenLabs), ${yueCount} Cantonese (Edge zh-HK)`
+  );
+
+  const parts: Buffer[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const chars = seg.lang === "yue"
+      ? (seg.text.match(/[\u4e00-\u9fff]/g) ?? []).length
+      : seg.text.length;
+    const provider =
+      seg.lang === "yue"
+        ? `Edge ${process.env.CANTONESE_TTS_VOICE ?? "zh-HK-HiuMaanNeural"}`
+        : `ElevenLabs ${TTS_MODEL_EN}`;
+    console.log(
+      `[audio] Segment ${i + 1}/${segments.length} (${seg.lang}, ~${chars} chars, ${provider})`
+    );
+    const part = await synthesizeSegment(apiKey, voiceId, seg, `seg${i + 1}-${seg.lang}`);
+    parts.push(part);
+  }
+
+  const buffer = await stitchMp3Buffers(parts);
   const sizeKb = Math.round(buffer.length / 1024);
-  console.log(`[audio] Done — ${sizeKb} KB MP3 received`);
+  console.log(`[audio] Done — ${sizeKb} KB MP3 (${parts.length} part(s) stitched)`);
 
   return buffer;
 }

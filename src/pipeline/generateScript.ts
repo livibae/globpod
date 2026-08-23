@@ -12,6 +12,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Article, GroupedArticles } from "./fetchArticles.js";
 import { withRetry } from "../util/retry.js";
+import type { AudioSegment } from "./generateAudio.js";
+import { inferSegmentsFromScript } from "./generateAudio.js";
 
 const MODEL = "claude-sonnet-5";
 
@@ -32,6 +34,8 @@ const SUMMARY_CHARS = 600;
 
 export interface ScriptResult {
   script: string;
+  /** Language-tagged blocks for TTS (Cantonese vs English). */
+  segments: AudioSegment[];
   /** Article IDs to blacklist after a successful publish. */
   usedArticleIds: string[];
   /** True when usedArticleIds fell back to all candidates shown to Claude. */
@@ -84,10 +88,17 @@ Respond with a single JSON object only — no markdown fences, no commentary bef
 {
   "used_ids": ["id1", "id2", "..."],
   "summary": "<2-3 sentence English blurb for podcast apps>",
-  "script": "<the full spoken script>"
+  "segments": [
+    { "lang": "en", "text": "<greeting>" },
+    { "lang": "yue", "text": "<Hong Kong section — all Cantonese paragraphs>" },
+    { "lang": "en", "text": "<United Kingdom section>" },
+    { "lang": "en", "text": "<Netherlands section>" },
+    { "lang": "en", "text": "<sign-off>" }
+  ]
 }
 
-used_ids must be copied exactly from the candidate id= values you actually covered in the script. Do not invent ids.
+segments is required for text-to-speech: lang must be "en" or "yue" (Cantonese). One segment per major block above — do not mix languages inside a segment.
+used_ids must be copied exactly from the candidate id= values you actually covered. Do not invent ids.
 summary must be plain English (even when the HK section is Cantonese), suitable as an episode description in Overcast/Apple Podcasts — no spoilers beyond the headlines, no markdown.`;
 
 /**
@@ -180,9 +191,46 @@ ${ukBlock}
 
 ${nlBlock}
 
-Return ONLY the JSON object described in your instructions: {"used_ids":[...],"summary":"...","script":"..."}.
+Return ONLY the JSON object described in your instructions: {"used_ids":[...],"summary":"...","segments":[...]}.
 used_ids must list every candidate id= value you covered, copied exactly.
-summary must be 2–3 English sentences describing today's episode for podcast apps.`;
+summary must be 2–3 English sentences describing today's episode for podcast apps.
+segments must follow the greeting → HK (yue) → UK (en) → NL (en) → sign-off (en) structure.`;
+}
+
+function parseSegments(raw: unknown, script: string): AudioSegment[] {
+  if (!Array.isArray(raw)) {
+    console.warn("[script] WARN: missing segments array — inferring from script paragraphs");
+    return inferSegmentsFromScript(script);
+  }
+
+  const segments: AudioSegment[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const text = typeof row.text === "string" ? row.text.trim() : "";
+    if (!text) continue;
+    const langRaw = row.lang;
+    const lang: AudioSegment["lang"] =
+      langRaw === "yue" || langRaw === "cantonese" || langRaw === "hk" ? "yue" : "en";
+    segments.push({ lang, text });
+  }
+
+  if (segments.length === 0) {
+    console.warn("[script] WARN: empty segments array — inferring from script paragraphs");
+    return inferSegmentsFromScript(script);
+  }
+
+  const yue = segments.filter((s) => s.lang === "yue").length;
+  if (yue === 0) {
+    console.warn("[script] WARN: no yue segment in JSON — inferring Cantonese blocks from script");
+    return inferSegmentsFromScript(script);
+  }
+
+  return segments;
+}
+
+function joinSegments(segments: AudioSegment[]): string {
+  return segments.map((s) => s.text).join("\n\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +306,7 @@ function parseScriptResponse(
     );
     return {
       script: maybeScript,
+      segments: inferSegmentsFromScript(maybeScript),
       usedArticleIds: fallbackIds,
       usedFallback: true,
       summary: fallbackSummary,
@@ -265,15 +314,6 @@ function parseScriptResponse(
   }
 
   const obj = parsed as Record<string, unknown>;
-  const script =
-    typeof obj.script === "string" ? obj.script.trim() :
-    typeof obj.text === "string" ? obj.text.trim() :
-    "";
-
-  if (script.length < 200) {
-    throw new Error("Claude JSON response missing a usable script field");
-  }
-
   const summary =
     typeof obj.summary === "string" ? obj.summary.trim() :
     typeof obj.description === "string" ? obj.description.trim() :
@@ -281,6 +321,18 @@ function parseScriptResponse(
 
   if (!summary) {
     console.warn("[script] WARN: missing episode summary in Claude response");
+  }
+
+  const scriptFromJson =
+    typeof obj.script === "string" ? obj.script.trim() :
+    typeof obj.text === "string" ? obj.text.trim() :
+    "";
+
+  const segments = parseSegments(obj.segments, scriptFromJson);
+  const script = scriptFromJson || joinSegments(segments);
+
+  if (script.length < 200) {
+    throw new Error("Claude JSON response missing a usable script (too short)");
   }
 
   const rawIds = Array.isArray(obj.used_ids)
@@ -305,6 +357,7 @@ function parseScriptResponse(
     );
     return {
       script,
+      segments,
       usedArticleIds: fallbackIds,
       usedFallback: true,
       summary,
@@ -317,7 +370,7 @@ function parseScriptResponse(
     );
   }
 
-  return { script, usedArticleIds: uniqueValid, usedFallback: false, summary };
+  return { script, segments, usedArticleIds: uniqueValid, usedFallback: false, summary };
 }
 
 // ---------------------------------------------------------------------------

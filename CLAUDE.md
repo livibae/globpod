@@ -43,7 +43,8 @@ clean code, keep infra costs low, avoid regressions.
 | Runtime | Node.js (TypeScript, ESM) |
 | RSS Parsing | rss-parser |
 | LLM | Anthropic Claude API (`claude-sonnet-5`) |
-| Audio | ElevenLabs Multilingual v2 |
+| Audio (English) | ElevenLabs Multilingual v2 (custom voice) |
+| Audio (Cantonese HK) | Microsoft Edge neural zh-HK (`edge-tts-universal`) |
 | Audio Duration | music-metadata |
 | Storage | Cloudflare R2 (MP3s + RSS XML) |
 | Database | SQLite via better-sqlite3 (used-article blacklist) |
@@ -102,7 +103,7 @@ MIN_ARTICLES_FOR_EPISODE=      # optional, default 5
    - ~3 stories/region, one paragraph each, target 10–15 minutes
    - Personal context: HK-born, UK 16–25, Amsterdam since Aug 2025
 6. Check ElevenLabs quota; email warning at ≥80%
-7. ElevenLabs TTS → MP3 buffer (with retry)
+7. Segmented TTS → stitch MP3 (English: ElevenLabs; Cantonese: Edge zh-HK)
 8. Upload MP3 to R2 `episodes/YYYY-MM-DD.mp3`
 9. Fetch existing feed XML (null on first run)
 10. Rebuild channel metadata + prepend episode (cap 10); `pubDate` is `YYYY-MM-DDT06:00:00Z`
@@ -134,7 +135,9 @@ globpod/
 │   ├── pipeline/
 │   │   ├── fetchArticles.ts      # RSS ingestion (read-only vs SQLite)
 │   │   ├── generateScript.ts     # Claude script + used_ids + summary
-│   │   ├── generateAudio.ts      # ElevenLabs TTS + quota check
+│   │   ├── generateAudio.ts      # Segmented TTS + stitch + ElevenLabs quota
+│   │   ├── synthesizeCantonese.ts # Edge zh-HK Cantonese TTS
+│   │   ├── stitchAudio.ts        # ffmpeg MP3 concat
 │   │   ├── uploadToR2.ts         # R2 upload/fetch
 │   │   └── updateFeed.ts         # RSS XML generation + update
 │   ├── db/

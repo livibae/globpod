@@ -83,7 +83,7 @@ export async function runPipeline(): Promise<void> {
   }
 
   // 3. Generate podcast script via Claude (also returns used article IDs + blurb)
-  const { script, usedArticleIds, usedFallback, summary } = await step(
+  const { script, segments, usedArticleIds, usedFallback, summary } = await step(
     "generateScript",
     () => generateScript(articles)
   );
@@ -108,7 +108,7 @@ export async function runPipeline(): Promise<void> {
   }
 
   // 4. Generate MP3 audio via ElevenLabs
-  const audioBuffer = await step("generateAudio", () => generateAudio(script));
+  const audioBuffer = await step("generateAudio", () => generateAudio(segments));
 
   // 5. Upload MP3 to R2
   const audioUrl = await step("uploadMp3", () => uploadMp3(audioBuffer, today));
