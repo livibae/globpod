@@ -15,6 +15,7 @@ import {
   NoSuchKey,
 } from "@aws-sdk/client-s3";
 import { Readable } from "stream";
+import { withRetry } from "../util/retry.js";
 
 // ---------------------------------------------------------------------------
 // R2 client (lazy singleton)
@@ -77,15 +78,19 @@ export async function uploadMp3(buffer: Buffer, date: string): Promise<string> {
 
   console.log(`[r2] Uploading MP3 → ${key}`);
 
-  await getClient().send(
-    new PutObjectCommand({
-      Bucket: getBucketName(),
-      Key: key,
-      Body: buffer,
-      ContentType: "audio/mpeg",
-      // Cache for 1 year — episode audio never changes after upload
-      CacheControl: "public, max-age=31536000, immutable",
-    })
+  await withRetry(
+    () =>
+      getClient().send(
+        new PutObjectCommand({
+          Bucket: getBucketName(),
+          Key: key,
+          Body: buffer,
+          ContentType: "audio/mpeg",
+          // Cache for 1 year — episode audio never changes after upload
+          CacheControl: "public, max-age=31536000, immutable",
+        })
+      ),
+    { label: "uploadMp3/r2", attempts: 3, baseDelayMs: 1500 }
   );
 
   const publicUrl = `${getPublicUrl()}/${key}`;
@@ -107,11 +112,21 @@ export async function fetchExistingFeed(): Promise<string | null> {
   console.log(`[r2] Fetching existing feed → ${key}`);
 
   try {
-    const response = await getClient().send(
-      new GetObjectCommand({
-        Bucket: getBucketName(),
-        Key: key,
-      })
+    const response = await withRetry(
+      () =>
+        getClient().send(
+          new GetObjectCommand({
+            Bucket: getBucketName(),
+            Key: key,
+          })
+        ),
+      {
+        label: "fetchExistingFeed/r2",
+        attempts: 3,
+        baseDelayMs: 1500,
+        // NoSuchKey is expected on first run — don't retry it
+        shouldRetry: (err) => !(err instanceof NoSuchKey),
+      }
     );
 
     // Convert the response stream to a string
@@ -149,15 +164,19 @@ export async function uploadFeed(xml: string): Promise<string> {
 
   console.log(`[r2] Uploading updated feed → ${key}`);
 
-  await getClient().send(
-    new PutObjectCommand({
-      Bucket: getBucketName(),
-      Key: key,
-      Body: Buffer.from(xml, "utf-8"),
-      ContentType: "application/rss+xml; charset=utf-8",
-      // No long-term caching — podcast apps should check for updates daily
-      CacheControl: "no-cache",
-    })
+  await withRetry(
+    () =>
+      getClient().send(
+        new PutObjectCommand({
+          Bucket: getBucketName(),
+          Key: key,
+          Body: Buffer.from(xml, "utf-8"),
+          ContentType: "application/rss+xml; charset=utf-8",
+          // No long-term caching — podcast apps should check for updates daily
+          CacheControl: "no-cache",
+        })
+      ),
+    { label: "uploadFeed/r2", attempts: 3, baseDelayMs: 1500 }
   );
 
   const feedUrl = `${getPublicUrl()}/${key}`;

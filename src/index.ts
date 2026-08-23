@@ -19,10 +19,10 @@ import { fileURLToPath } from "url";
 import { purgeOldArticles, markArticlesUsed } from "./db/sqlite.js";
 import { fetchArticles } from "./pipeline/fetchArticles.js";
 import { generateScript, allCandidates } from "./pipeline/generateScript.js";
-import { generateAudio } from "./pipeline/generateAudio.js";
+import { generateAudio, fetchElevenLabsQuota, isQuotaWarning } from "./pipeline/generateAudio.js";
 import { uploadMp3, fetchExistingFeed, uploadFeed } from "./pipeline/uploadToR2.js";
 import { buildUpdatedFeed } from "./pipeline/updateFeed.js";
-import { sendErrorEmail } from "./notify.js";
+import { sendErrorEmail, sendQuotaWarningEmail } from "./notify.js";
 import type { Article } from "./pipeline/fetchArticles.js";
 
 // ---------------------------------------------------------------------------
@@ -82,10 +82,30 @@ export async function runPipeline(): Promise<void> {
     return;
   }
 
-  // 3. Generate podcast script via Claude (also returns used article IDs)
-  const { script, usedArticleIds, usedFallback } = await step("generateScript", () =>
-    generateScript(articles)
+  // 3. Generate podcast script via Claude (also returns used article IDs + blurb)
+  const { script, usedArticleIds, usedFallback, summary } = await step(
+    "generateScript",
+    () => generateScript(articles)
   );
+
+  // 3b. ElevenLabs quota check — warn early, never block the run
+  try {
+    const quota = await fetchElevenLabsQuota();
+    if (quota) {
+      const pct = Math.round(quota.ratio * 100);
+      console.log(
+        `[quota] ElevenLabs usage: ${quota.characterCount}/${quota.characterLimit} (${pct}%)`
+      );
+      if (isQuotaWarning(quota)) {
+        await sendQuotaWarningEmail(quota);
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "[quota] WARN: could not fetch ElevenLabs usage:",
+      err instanceof Error ? err.message : err
+    );
+  }
 
   // 4. Generate MP3 audio via ElevenLabs
   const audioBuffer = await step("generateAudio", () => generateAudio(script));
@@ -103,6 +123,7 @@ export async function runPipeline(): Promise<void> {
       audioUrl,
       audioBuffer,
       audioSize: audioBuffer.length,
+      summary,
     })
   );
 

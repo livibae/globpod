@@ -11,6 +11,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import type { Article, GroupedArticles } from "./fetchArticles.js";
+import { withRetry } from "../util/retry.js";
 
 const MODEL = "claude-sonnet-5";
 
@@ -35,6 +36,8 @@ export interface ScriptResult {
   usedArticleIds: string[];
   /** True when usedArticleIds fell back to all candidates shown to Claude. */
   usedFallback: boolean;
+  /** 2–3 sentence English episode blurb for podcast apps. */
+  summary: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -80,10 +83,12 @@ RESPONSE FORMAT
 Respond with a single JSON object only — no markdown fences, no commentary before or after:
 {
   "used_ids": ["id1", "id2", "..."],
+  "summary": "<2-3 sentence English blurb for podcast apps>",
   "script": "<the full spoken script>"
 }
 
-used_ids must be copied exactly from the candidate id= values you actually covered in the script. Do not invent ids.`;
+used_ids must be copied exactly from the candidate id= values you actually covered in the script. Do not invent ids.
+summary must be plain English (even when the HK section is Cantonese), suitable as an episode description in Overcast/Apple Podcasts — no spoilers beyond the headlines, no markdown.`;
 
 /**
  * Articles Claude will actually see for a region (capped).
@@ -175,8 +180,9 @@ ${ukBlock}
 
 ${nlBlock}
 
-Return ONLY the JSON object described in your instructions: {"used_ids":[...],"script":"..."}.
-used_ids must list every candidate id= value you covered, copied exactly.`;
+Return ONLY the JSON object described in your instructions: {"used_ids":[...],"summary":"...","script":"..."}.
+used_ids must list every candidate id= value you covered, copied exactly.
+summary must be 2–3 English sentences describing today's episode for podcast apps.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +245,8 @@ function parseScriptResponse(
   const fallbackIds = candidates.map((a) => a.id);
   const parsed = extractJsonObject(raw);
 
+  const fallbackSummary = "";
+
   // No JSON at all — if the raw text looks like a script, use it with fallback ids
   if (!parsed || typeof parsed !== "object") {
     const maybeScript = raw.trim();
@@ -248,7 +256,12 @@ function parseScriptResponse(
     console.warn(
       "[script] WARN: could not parse JSON — blacklisting all candidates shown to Claude as fallback"
     );
-    return { script: maybeScript, usedArticleIds: fallbackIds, usedFallback: true };
+    return {
+      script: maybeScript,
+      usedArticleIds: fallbackIds,
+      usedFallback: true,
+      summary: fallbackSummary,
+    };
   }
 
   const obj = parsed as Record<string, unknown>;
@@ -259,6 +272,15 @@ function parseScriptResponse(
 
   if (script.length < 200) {
     throw new Error("Claude JSON response missing a usable script field");
+  }
+
+  const summary =
+    typeof obj.summary === "string" ? obj.summary.trim() :
+    typeof obj.description === "string" ? obj.description.trim() :
+    fallbackSummary;
+
+  if (!summary) {
+    console.warn("[script] WARN: missing episode summary in Claude response");
   }
 
   const rawIds = Array.isArray(obj.used_ids)
@@ -281,7 +303,12 @@ function parseScriptResponse(
     console.warn(
       "[script] WARN: used_ids missing or invalid — blacklisting all candidates shown to Claude as fallback"
     );
-    return { script, usedArticleIds: fallbackIds, usedFallback: true };
+    return {
+      script,
+      usedArticleIds: fallbackIds,
+      usedFallback: true,
+      summary,
+    };
   }
 
   if (rawIds && uniqueValid.length < rawIds.length) {
@@ -290,7 +317,7 @@ function parseScriptResponse(
     );
   }
 
-  return { script, usedArticleIds: uniqueValid, usedFallback: false };
+  return { script, usedArticleIds: uniqueValid, usedFallback: false, summary };
 }
 
 // ---------------------------------------------------------------------------
@@ -313,12 +340,16 @@ export async function generateScript(
 
   console.log("[script] Generating podcast script via Claude...");
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: MAX_TOKENS,
-    system: SYSTEM_PROMPT,
-    messages: [{ role: "user", content: prompt }],
-  });
+  const response = await withRetry(
+    () =>
+      client.messages.create({
+        model: MODEL,
+        max_tokens: MAX_TOKENS,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    { label: "generateScript/claude", attempts: 3, baseDelayMs: 2000 }
+  );
 
   // Find the text block. Don't assume content[0] — Sonnet 5 has adaptive
   // thinking on by default, so thinking blocks can precede the text.
@@ -342,7 +373,8 @@ export async function generateScript(
   console.log(
     `[script] Done — ~${latinWords} English words + ${cjkChars} Chinese characters; ` +
       `${result.usedArticleIds.length} used id(s)` +
-      (result.usedFallback ? " (fallback: all candidates)" : "")
+      (result.usedFallback ? " (fallback: all candidates)" : "") +
+      (result.summary ? `; summary=${result.summary.length}ch` : "")
   );
 
   return result;

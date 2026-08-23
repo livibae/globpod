@@ -1,11 +1,12 @@
 /**
- * Error notification via Resend email.
+ * Notifications via Resend email.
  *
- * Called by the pipeline orchestrator when any step fails.
- * Sends a formatted error email with the step name, error message, and stack trace.
+ * - Error alerts when a pipeline step fails
+ * - Quota warnings when ElevenLabs usage crosses the threshold (LIV-11)
  */
 
 import { Resend } from "resend";
+import type { ElevenLabsQuota } from "./pipeline/generateAudio.js";
 
 let resend: Resend | null = null;
 
@@ -54,5 +55,38 @@ export async function sendErrorEmail(step: string, error: Error): Promise<void> 
   } catch (sendErr) {
     // Don't let the notification failure mask the original error
     console.error("[notify] Failed to send error email:", sendErr);
+  }
+}
+
+/**
+ * Warn when ElevenLabs character usage is at/above the configured threshold.
+ * Best-effort — never throws into the pipeline.
+ */
+export async function sendQuotaWarningEmail(quota: ElevenLabsQuota): Promise<void> {
+  const toEmail = process.env.NOTIFY_EMAIL;
+  if (!toEmail) {
+    console.error("[notify] NOTIFY_EMAIL not set — skipping quota warning email");
+    return;
+  }
+
+  const pct = Math.round(quota.ratio * 100);
+  const subject = `[GlobPod] ElevenLabs quota warning: ${pct}% used`;
+  const html = `
+    <h2>ElevenLabs usage is high</h2>
+    <p><strong>Used:</strong> ${quota.characterCount.toLocaleString()} / ${quota.characterLimit.toLocaleString()} characters (${pct}%)</p>
+    <p>GlobPod will keep running, but TTS may fail once the monthly character limit is hit. Consider upgrading the plan or pausing daily runs.</p>
+    <p><strong>Time:</strong> ${new Date().toISOString()}</p>
+  `.trim();
+
+  try {
+    await getResend().emails.send({
+      from: "GlobPod <onboarding@resend.dev>",
+      to: toEmail,
+      subject,
+      html,
+    });
+    console.log(`[notify] Quota warning email sent to ${toEmail} (${pct}%)`);
+  } catch (sendErr) {
+    console.error("[notify] Failed to send quota warning email:", sendErr);
   }
 }

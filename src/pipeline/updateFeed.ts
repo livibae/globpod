@@ -10,6 +10,7 @@
 
 import { parseBuffer } from "music-metadata";
 import { XMLParser, XMLBuilder } from "fast-xml-parser";
+import { getPodcastConfig } from "../config/podcast.js";
 
 // Maximum number of episodes kept in the feed
 const MAX_EPISODES = 10;
@@ -19,10 +20,12 @@ const MAX_EPISODES = 10;
 // ---------------------------------------------------------------------------
 
 export interface EpisodeInput {
-  date: string;       // YYYY-MM-DD
-  audioUrl: string;   // public MP3 URL
+  date: string; // YYYY-MM-DD
+  audioUrl: string; // public MP3 URL
   audioBuffer: Buffer; // MP3 bytes — used to parse real duration
-  audioSize: number;  // byte length of the MP3
+  audioSize: number; // byte length of the MP3
+  /** 2–3 sentence episode blurb for podcast apps (optional). */
+  summary?: string;
 }
 
 interface ParsedChannel {
@@ -61,6 +64,14 @@ function formatDuration(totalSeconds: number): string {
   return [h, m, s].map((v) => String(v).padStart(2, "0")).join(":");
 }
 
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 // ---------------------------------------------------------------------------
 // XML parser + builder (configured for podcast RSS 2.0)
 // ---------------------------------------------------------------------------
@@ -69,7 +80,7 @@ const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
   allowBooleanAttributes: true,
-  isArray: (name) => name === "item", // always treat <item> as an array
+  isArray: (name) => name === "item" || name === "itunes:category",
 });
 
 const xmlBuilder = new XMLBuilder({
@@ -84,16 +95,13 @@ const xmlBuilder = new XMLBuilder({
 // RSS feed helpers
 // ---------------------------------------------------------------------------
 
-// Cover art URL — required by podcast apps (Overcast, Apple Podcasts).
-// placehold.co serves a direct JPG with no redirects (picsum redirects, which Overcast rejects).
-// Replace with a self-hosted 1400×1400 image on R2 when ready.
-const COVER_ART_URL = "https://placehold.co/1400x1400/0066CC/FFFFFF.jpg?text=GlobPod";
-
 /**
  * Build the channel skeleton for the feed.
  * Always rebuilt fresh on each run so metadata edits propagate to the live feed.
  */
 function buildBlankFeed(): string {
+  const podcast = getPodcastConfig();
+
   // Channel link must resolve to an HTML page (text/html).
   // We host a minimal index.html in R2 — see src/uploadHomepage.ts.
   const baseUrl = process.env.CF_R2_PUBLIC_URL?.replace(/\/$/, "");
@@ -102,26 +110,39 @@ function buildBlankFeed(): string {
   const feedUrl =
     baseUrl && feedToken ? `${baseUrl}/feed/${feedToken}.xml` : homepageUrl;
 
+  const categoryXml = podcast.categories
+    .map((cat) => {
+      if (cat.subcategory) {
+        return `    <itunes:category text="${escapeXml(cat.text)}">
+      <itunes:category text="${escapeXml(cat.subcategory)}"/>
+    </itunes:category>`;
+      }
+      return `    <itunes:category text="${escapeXml(cat.text)}"/>`;
+    })
+    .join("\n");
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"
   xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
   xmlns:content="http://purl.org/rss/1.0/modules/content/"
   xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
-    <title>GlobPod</title>
+    <title>${escapeXml(podcast.title)}</title>
     <link>${homepageUrl}</link>
     <atom:link href="${feedUrl}" rel="self" type="application/rss+xml"/>
-    <description>Your personal AI-powered daily news podcast covering Hong Kong, UK, and Netherlands.</description>
-    <language>en</language>
-    <itunes:author>GlobPod</itunes:author>
+    <description>${escapeXml(podcast.description)}</description>
+    <itunes:summary>${escapeXml(podcast.summary)}</itunes:summary>
+    <copyright>${escapeXml(podcast.copyright)}</copyright>
+    <language>${escapeXml(podcast.language)}</language>
+    <itunes:author>${escapeXml(podcast.author)}</itunes:author>
     <itunes:type>episodic</itunes:type>
-    <itunes:image href="${COVER_ART_URL}"/>
+    <itunes:image href="${escapeXml(podcast.coverArtUrl)}"/>
     <itunes:owner>
-      <itunes:name>GlobPod</itunes:name>
-      <itunes:email>noreply@globpod.local</itunes:email>
+      <itunes:name>${escapeXml(podcast.ownerName)}</itunes:name>
+      <itunes:email>${escapeXml(podcast.ownerEmail)}</itunes:email>
     </itunes:owner>
     <itunes:explicit>false</itunes:explicit>
-    <itunes:category text="News"/>
+${categoryXml}
   </channel>
 </rss>`;
 }
@@ -134,25 +155,42 @@ function buildEpisodeObject(
   date: string,
   audioUrl: string,
   audioSize: number,
-  durationSeconds: number
+  durationSeconds: number,
+  summary?: string
 ): Record<string, unknown> {
+  const podcast = getPodcastConfig();
+
   // Episode link must be HTML — we don't host per-episode pages, so reuse the homepage.
   const baseUrl = process.env.CF_R2_PUBLIC_URL?.replace(/\/$/, "");
   const link = baseUrl ? `${baseUrl}/index.html` : "https://example.com";
 
-  return {
-    title: `GlobPod — ${date}`,
+  // Explicit Z so pubDate is always 06:00 UTC regardless of host timezone (LIV-11).
+  const pubDate = new Date(
+    `${date}T${podcast.episodePublishTimeUtc}Z`
+  ).toUTCString();
+
+  const episode: Record<string, unknown> = {
+    title: `${podcast.title} — ${date}`,
     link,
-    pubDate: new Date(`${date}T06:00:00`).toUTCString(),
+    pubDate,
     guid: { "#text": audioUrl, "@_isPermaLink": "false" },
     enclosure: {
       "@_url": audioUrl,
       "@_length": String(audioSize),
       "@_type": "audio/mpeg",
     },
+    "itunes:author": podcast.author,
     "itunes:duration": formatDuration(durationSeconds),
     "itunes:explicit": "false",
   };
+
+  if (summary && summary.trim()) {
+    const blurb = summary.trim();
+    episode.description = blurb;
+    episode["itunes:summary"] = blurb;
+  }
+
+  return episode;
 }
 
 /**
@@ -235,7 +273,8 @@ export async function buildUpdatedFeed(
     episode.date,
     episode.audioUrl,
     episode.audioSize,
-    durationSeconds
+    durationSeconds,
+    episode.summary
   );
 
   // Prepend the new episode, dedup by guid (so re-runs on the same day don't duplicate),
