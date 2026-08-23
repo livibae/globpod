@@ -22,4 +22,8 @@ globpod.db-wal
 *.tmp.mts
 *.tmp.ts
 cantonese-probe.mp3
+cantonese-only-probe.mp3
+cantonese-probe-reencoded.mp3
+probe-en.mp3
+probe-yue.mp3
 /tmp/

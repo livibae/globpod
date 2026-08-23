@@ -1,6 +1,8 @@
 /**
  * Concatenate multiple MP3 buffers into one episode file.
- * Uses ffmpeg concat demuxer (stream copy — no re-encode).
+ *
+ * Re-encodes to 44.1 kHz mono MP3 — stream-copy concat breaks when parts use
+ * different sample rates (ElevenLabs 44100 Hz vs Edge zh-HK 24000 Hz).
  */
 
 import { createRequire } from "module";
@@ -38,22 +40,26 @@ export async function stitchMp3Buffers(parts: Buffer[]): Promise<Buffer> {
       partPaths.push(partPath);
     }
 
-    // ffmpeg concat list — paths are inside a temp dir we control
-    const listPath = path.join(dir, "concat.txt");
-    const listContent = partPaths.map((p) => `file '${p}'`).join("\n");
-    await writeFile(listPath, listContent);
-
     const outPath = path.join(dir, "output.mp3");
+
+    // filter_complex concat decodes each part and handles mixed sample rates.
+    const inputArgs = partPaths.flatMap((p) => ["-i", p]);
+    const concatInputs = partPaths.map((_, i) => `[${i}:a]`).join("");
+    const filter = `${concatInputs}concat=n=${partPaths.length}:v=0:a=1[outa]`;
+
     await execFileAsync(ffmpeg, [
       "-y",
-      "-f",
-      "concat",
-      "-safe",
-      "0",
-      "-i",
-      listPath,
-      "-c",
-      "copy",
+      ...inputArgs,
+      "-filter_complex",
+      filter,
+      "-map",
+      "[outa]",
+      "-c:a",
+      "libmp3lame",
+      "-ar",
+      "44100",
+      "-b:a",
+      "128k",
       outPath,
     ]);
 
