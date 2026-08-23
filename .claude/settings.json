@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /Users/liviayeung/globpod log --oneline)",
+      "Bash(npm install)",
+      "Bash(npm run build)",
+      "Bash(node -e \"import\\(''music-metadata''\\).then\\(m => console.log\\(Object.keys\\(m\\)\\)\\)\")",
+      "WebFetch(domain:developers.cloudflare.com)",
+      "Bash(npm run dev)",
+      "Bash(node -e \"import\\(''dotenv/config''\\).then\\(\\(\\) => console.log\\(''KEY_LENGTH:'', process.env.ANTHROPIC_API_KEY?.length ?? 0\\)\\)\")",
+      "Bash(npm install fast-xml-parser)",
+      "Bash(npx tsc --noEmit)",
+      "Read(//Users/liviayeung/**)",
+      "Bash(ls /Users/liviayeung/.cursor/mcp*.json)",
+      "Bash(ls /Users/liviayeung/.cursor/settings*.json)",
+      "Bash(claude mcp add --help)"
+    ]
+  }
+}

@@ -1,0 +1,24 @@
+# secrets & local env
+.env
+.env.local
+.env.*.local
+
+# dependencies & build
+node_modules/
+dist/
+
+# local SQLite state (dedup DB)
+globpod.db
+globpod.db-shm
+globpod.db-wal
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# scratch / one-off probes
+*.tmp.mts
+*.tmp.ts
+/tmp/
