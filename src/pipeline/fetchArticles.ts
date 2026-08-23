@@ -1,13 +1,16 @@
 /**
  * RSS ingestion + deduplication for GlobPod.
  *
- * Fetches all 6 curated feeds, filters to the last 24 hours,
- * deduplicates via SQLite (guid ?? link as ID), and returns
- * articles grouped by region ready for script generation.
+ * Fetches all 6 curated feeds, filters to the last 24 hours, skips articles
+ * already used in a published episode (SQLite), and returns articles grouped
+ * by region ready for script generation.
+ *
+ * Does NOT write to SQLite. Blacklisting happens after a successful publish
+ * via markArticlesUsed() (LIV-8).
  */
 
 import Parser from "rss-parser";
-import { hasArticle, insertArticle } from "../db/sqlite.js";
+import { hasArticle } from "../db/sqlite.js";
 
 // ---------------------------------------------------------------------------
 // Feed definitions
@@ -40,7 +43,7 @@ const FEEDS: FeedSource[] = [
 // ---------------------------------------------------------------------------
 
 export interface Article {
-  id: string; // deduplication key
+  id: string; // namespaced dedup key: `${feedName}:${guid|link}`
   title: string;
   link: string;
   summary: string; // content snippet or description
@@ -62,6 +65,14 @@ export interface GroupedArticles {
 const parser = new Parser({
   timeout: 10_000, // 10s per feed — fail fast rather than stall the pipeline
 });
+
+/**
+ * Namespace a raw RSS guid/link under its feed name.
+ * Prevents bare-integer guids (e.g. NL Times "91190") colliding across feeds.
+ */
+export function articleId(feedName: string, rawId: string): string {
+  return `${feedName}:${rawId}`;
+}
 
 /**
  * Parse an RSS date string, tolerating formats `new Date()` rejects.
@@ -104,12 +115,13 @@ async function fetchFeed(source: FeedSource): Promise<Article[]> {
     const skipped = { noKey: 0, noDate: 0, badDate: 0, old: 0, seen: 0 };
 
     for (const item of feed.items) {
-      // Deduplication key: prefer guid, fall back to link
-      const id = item.guid ?? item.link;
-      if (!id) {
+      // Deduplication key: prefer guid, fall back to link — then namespace
+      const rawId = item.guid ?? item.link;
+      if (!rawId) {
         skipped.noKey++;
         continue; // skip items with no identifiable key
       }
+      const id = articleId(source.name, rawId);
 
       // Parse publish date; prefer isoDate (rss-parser's normalised field)
       const rawDate = item.isoDate ?? item.pubDate;
@@ -129,33 +141,21 @@ async function fetchFeed(source: FeedSource): Promise<Article[]> {
         continue;
       }
 
-      // Skip if already seen
+      // Skip if already used in a published episode
       if (hasArticle(id)) {
         skipped.seen++;
         continue;
       }
 
-      const article: Article = {
+      articles.push({
         id,
         title: item.title ?? "(no title)",
-        link: item.link ?? id,
+        link: item.link ?? rawId,
         summary: item.contentSnippet ?? item.content ?? item.summary ?? "",
         region: source.region,
         feedName: source.name,
         pubDate,
-      };
-
-      // Persist to DB before appending — prevents double-processing on retry
-      insertArticle({
-        id,
-        title: article.title,
-        feed_source: source.name,
-        region: source.region,
-        pub_date: pubDate.toISOString(),
-        fetched_at: new Date().toISOString(),
       });
-
-      articles.push(article);
     }
 
     console.log(`  [fetch] ${source.name}: ${articles.length} new article(s)`);
@@ -184,8 +184,8 @@ async function fetchFeed(source: FeedSource): Promise<Article[]> {
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch all feeds, deduplicate, and return articles grouped by region.
- * Also purges SQLite rows older than 7 days before returning.
+ * Fetch all feeds, skip already-used articles, return grouped by region.
+ * Read-only against SQLite — does not blacklist anything.
  */
 export async function fetchArticles(): Promise<GroupedArticles> {
   // Fetch all feeds concurrently

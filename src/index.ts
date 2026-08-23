@@ -3,6 +3,10 @@
  *
  * Wires all pipeline steps in sequence:
  *   fetch → script → audio → upload MP3 → fetch feed → update feed → upload feed
+ *   → blacklist used articles
+ *
+ * Articles are only written to SQLite after a successful publish (LIV-8),
+ * so a failed run does not burn the candidate pool.
  *
  * Each step is wrapped in error handling — on failure, an alert email is sent
  * before the error propagates and halts the run.
@@ -12,13 +16,14 @@
 
 import "dotenv/config";
 import { fileURLToPath } from "url";
-import { purgeOldArticles } from "./db/sqlite.js";
+import { purgeOldArticles, markArticlesUsed } from "./db/sqlite.js";
 import { fetchArticles } from "./pipeline/fetchArticles.js";
-import { generateScript } from "./pipeline/generateScript.js";
+import { generateScript, allCandidates } from "./pipeline/generateScript.js";
 import { generateAudio } from "./pipeline/generateAudio.js";
 import { uploadMp3, fetchExistingFeed, uploadFeed } from "./pipeline/uploadToR2.js";
 import { buildUpdatedFeed } from "./pipeline/updateFeed.js";
 import { sendErrorEmail } from "./notify.js";
+import type { Article } from "./pipeline/fetchArticles.js";
 
 // ---------------------------------------------------------------------------
 // Step runner with error notification
@@ -61,7 +66,7 @@ export async function runPipeline(): Promise<void> {
     console.warn("[db] WARN: failed to purge old articles");
   }
 
-  // 2. Fetch and deduplicate articles from all feeds
+  // 2. Fetch articles (read-only against SQLite — does not blacklist)
   const articles = await step("fetchArticles", () => fetchArticles());
 
   // 2b. Skip episode generation if too few articles — prevents wasted TTS credits
@@ -77,8 +82,10 @@ export async function runPipeline(): Promise<void> {
     return;
   }
 
-  // 3. Generate podcast script via Claude
-  const script = await step("generateScript", () => generateScript(articles));
+  // 3. Generate podcast script via Claude (also returns used article IDs)
+  const { script, usedArticleIds, usedFallback } = await step("generateScript", () =>
+    generateScript(articles)
+  );
 
   // 4. Generate MP3 audio via ElevenLabs
   const audioBuffer = await step("generateAudio", () => generateAudio(script));
@@ -101,6 +108,42 @@ export async function runPipeline(): Promise<void> {
 
   // 8. Upload updated feed XML to R2
   const feedUrl = await step("uploadFeed", () => uploadFeed(updatedFeedXml));
+
+  // 9. Blacklist only the articles that made it into this published episode.
+  //    Done AFTER a successful publish so failed runs don't burn candidates (LIV-8).
+  try {
+    const byId = new Map(allCandidates(articles).map((a) => [a.id, a]));
+    // If fallback already expanded to all candidates, usedArticleIds is that set.
+    // Still resolve against the candidate map so we have full metadata to store.
+    const toMark: Article[] = [];
+    for (const id of usedArticleIds) {
+      const article = byId.get(id);
+      if (article) toMark.push(article);
+    }
+
+    const usedAt = new Date().toISOString();
+    const written = markArticlesUsed(
+      toMark.map((a) => ({
+        id: a.id,
+        title: a.title,
+        feed_source: a.feedName,
+        region: a.region,
+        pub_date: a.pubDate.toISOString(),
+        used_at: usedAt,
+      }))
+    );
+    console.log(
+      `[db] Blacklisted ${written} used article(s)` +
+        (usedFallback ? " (fallback: all candidates shown to Claude)" : "")
+    );
+  } catch (err) {
+    // Non-fatal for the listener — episode is already live — but log loudly:
+    // without this write, the next run may re-use the same stories.
+    console.error(
+      "[db] ERROR: failed to blacklist used articles:",
+      err instanceof Error ? err.message : err
+    );
+  }
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   console.log(`\n====== GlobPod pipeline complete (${elapsed}s) ======`);
