@@ -48,7 +48,7 @@ clean code, keep infra costs low, avoid regressions.
 | Audio Duration | music-metadata |
 | Storage | Cloudflare R2 (MP3s + RSS XML) |
 | Database | SQLite via better-sqlite3 (used-article blacklist) |
-| Scheduling | node-cron (daily 6AM — not yet hosted long-term) |
+| Scheduling | node-cron (default 09:45 local; `PIPELINE_CRON` in `.env`) |
 | Error / quota notifications | Resend |
 | Config | dotenv + `src/config/podcast.ts` |
 

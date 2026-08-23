@@ -1,10 +1,11 @@
 /**
  * GlobPod daily scheduler.
  *
- * Runs the pipeline every day at 6:00 AM local time using node-cron.
+ * Runs the pipeline every day at 09:45 local time by default (node-cron).
+ * Override with PIPELINE_CRON in .env.
  * This is the entry point for production (`npm run start`).
  *
- * To run the pipeline immediately (without waiting for 6 AM), use:
+ * To run the pipeline immediately (without waiting for the scheduled time), use:
  *   npm run run-once
  */
 
@@ -12,12 +13,22 @@ import "dotenv/config";
 import cron from "node-cron";
 import { runPipeline } from "./index.js";
 
-// Cron expression: every day at 06:00 local time
-// Format: second(optional) minute hour day-of-month month day-of-week
-const SCHEDULE = "0 6 * * *";
+// Cron: minute hour day-of-month month day-of-week (local time of the host).
+// Default 09:45 — override with PIPELINE_CRON in .env (e.g. "0 6 * * *" for 6:00).
+const SCHEDULE = process.env.PIPELINE_CRON?.trim() || "45 9 * * *";
 
-console.log("GlobPod scheduler started — pipeline will run daily at 06:00 local time");
-console.log(`Next run scheduled at 06:00 on ${getNextRunDate()}`);
+function scheduleLabel(): string {
+  const parts = SCHEDULE.split(/\s+/);
+  if (parts.length >= 2) {
+    const minute = parts[0].padStart(2, "0");
+    const hour = parts[1].padStart(2, "0");
+    return `${hour}:${minute} local time`;
+  }
+  return SCHEDULE;
+}
+
+console.log(`GlobPod scheduler started — pipeline will run daily at ${scheduleLabel()}`);
+console.log(`Cron expression: ${SCHEDULE}`);
 
 cron.schedule(SCHEDULE, async () => {
   console.log(`\n[scheduler] Triggering pipeline at ${new Date().toISOString()}`);
@@ -29,7 +40,7 @@ cron.schedule(SCHEDULE, async () => {
   }
 });
 
-/** Helper: returns a human-readable string of tomorrow's date for the startup log. */
+/** Helper: human-readable tomorrow for the startup log. */
 function getNextRunDate(): string {
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);

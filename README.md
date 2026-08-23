@@ -23,7 +23,7 @@ npm run build
 | `npm run dev` | Run the pipeline once from TypeScript (`tsx`) |
 | `npm run build` | Compile to `dist/` |
 | `npm run run-once` | Run the compiled pipeline once |
-| `npm start` | Start the daily 6 AM cron scheduler |
+| `npm start` | Start the daily scheduler (default **09:45** local; set `PIPELINE_CRON` in `.env`) |
 | `npx tsx src/regenFeed.ts` | Rebuild channel metadata on the live feed (keeps episodes) |
 | `npx tsx src/uploadHomepage.ts` | Upload the minimal HTML homepage required by feed validators |
 
