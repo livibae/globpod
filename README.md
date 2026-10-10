@@ -2,9 +2,49 @@
 
 Personal AI-powered morning news podcast. Fetches RSS from Hong Kong, UK, and the Netherlands, writes a bilingual script with Claude, speaks English with ElevenLabs and Hong Kong with Microsoft Edge Cantonese voices, and publishes a private podcast RSS feed on Cloudflare R2.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Sources["RSS sources"]
+        HK["Hong Kong<br/>SCMP, HKFP"]
+        UK["UK<br/>BBC, Guardian"]
+        NL["Netherlands<br/>DutchNews, NL Times"]
+    end
+
+    Cron["Scheduler<br/>node-cron, 09:45 daily"] --> Pipeline
+
+    subgraph Pipeline["GlobPod pipeline (Node.js / TypeScript)"]
+        direction TB
+        Fetch["1. Fetch + dedupe<br/>last 24h articles"]
+        Script["2. Write script<br/>Claude Sonnet 5"]
+        Audio["3. Text-to-speech<br/>per language segment"]
+        Stitch["4. Stitch MP3<br/>ffmpeg"]
+        Publish["5. Publish<br/>MP3 + RSS feed"]
+        Mark["6. Blacklist used articles"]
+        Fetch --> Script --> Audio --> Stitch --> Publish --> Mark
+    end
+
+    HK & UK & NL --> Fetch
+
+    DB[("SQLite<br/>used-article blacklist")]
+    Fetch <-.->|"check seen"| DB
+    Mark -.->|"write used"| DB
+
+    Audio -->|"English"| EL["ElevenLabs<br/>custom voice"]
+    Audio -->|"Cantonese (HK)"| Edge["Microsoft Edge TTS<br/>zh-HK neural voice"]
+
+    Publish --> R2[("Cloudflare R2<br/>episodes + feed.xml")]
+    R2 --> Overcast["Podcast app<br/>(Overcast)"]
+
+    Pipeline -.->|"errors / quota warnings"| Resend["Resend email"]
+```
+
+**Why two TTS providers?** ElevenLabs has no Cantonese support (Chinese text is read as Mandarin), so the Hong Kong section uses Microsoft Edge's `zh-HK` voices and is stitched together with the English parts.
+
 ## Requirements
 
-- Node.js 18+
+- Node.js 24 (see `.nvmrc`) — `better-sqlite3` does not build on Node 26 yet
 - Accounts/keys for: Anthropic, ElevenLabs, Cloudflare R2, Resend
 
 ## Setup
